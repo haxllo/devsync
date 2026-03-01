@@ -22,6 +22,14 @@ Phase 4 target: start commercial scale motion with self-serve value communicatio
   - webhook-ready outbox events with acknowledgement flow
   - local billing HTTP API via `billing-serve`
   - remote billing client mode via `--billing-url` + `--auth-token`
+- Launch hardening additions:
+  - API key lifecycle commands: `auth-key-create`, `auth-key-ls`, `auth-key-revoke`
+  - entitlement check command: `entitlement-check`
+  - scoped auth store support for `registry-serve` and `billing-serve` via `--auth-store`
+  - per-key/org authorization checks and route-level scopes
+  - optional registry entitlement enforcement via `registry-serve --enforce-entitlements`
+  - per-key rate limits returning HTTP `429`
+  - append-only HTTP access logs (`access.log`) for registry and billing services
 - Validation automation:
   - new `scripts/phase4-validate.sh`
   - timestamped report output in `docs/reports/`
@@ -69,6 +77,19 @@ Remote billing flow:
 devsync billing-plan-ls --billing-url http://127.0.0.1:8795 --auth-token "$DEVSYNC_AUTH_TOKEN"
 ```
 
+API key flow:
+
+```bash
+devsync auth-key-create \
+  --subject ci-bot \
+  --service registry \
+  --org acme \
+  --scope registry.read \
+  --scope registry.write
+devsync auth-key-ls
+devsync auth-key-revoke key_123
+```
+
 JSON mode:
 
 ```bash
@@ -77,7 +98,7 @@ devsync --path /path/to/repo activate --json
 ```
 
 ## Validation Summary
-- Unit tests passing (`cargo test`: 33 passed).
+- Unit tests passing (`cargo test`: 36 passed).
 - Phase 4 validation script added and executed:
   - `scripts/phase4-validate.sh`
   - report: `docs/reports/phase4-validation-2026-03-01.md`

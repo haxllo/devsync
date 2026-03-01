@@ -1,4 +1,5 @@
 mod activation;
+mod auth;
 mod billing;
 mod cli;
 mod dashboard;
@@ -123,9 +124,56 @@ fn main() -> Result<()> {
         Commands::RegistryServe {
             bind,
             registry,
+            billing,
+            enforce_entitlements,
             auth_token,
+            auth_store,
             once,
-        } => run_registry_serve(bind, registry, auth_token, once),
+        } => run_registry_serve(
+            bind,
+            registry,
+            billing,
+            enforce_entitlements,
+            auth_token,
+            auth_store,
+            once,
+        ),
+        Commands::AuthKeyCreate {
+            auth_store,
+            subject,
+            service,
+            org,
+            scopes,
+            ttl_days,
+            rate_limit_rpm,
+            note,
+            json,
+        } => run_auth_key_create(
+            auth_store,
+            auth::CreateApiKeyInput {
+                subject,
+                service,
+                org,
+                scopes,
+                ttl_days,
+                rate_limit_per_minute: rate_limit_rpm,
+                note,
+            },
+            json,
+        ),
+        Commands::AuthKeyLs { auth_store, json } => run_auth_key_ls(auth_store, json),
+        Commands::AuthKeyRevoke {
+            key_id,
+            auth_store,
+            json,
+        } => run_auth_key_revoke(key_id, auth_store, json),
+        Commands::EntitlementCheck {
+            org,
+            billing,
+            billing_url,
+            auth_token,
+            json,
+        } => run_entitlement_check(org, billing, billing_url, auth_token, json),
         Commands::Policy { policy, json } => run_policy(&project_path, policy, json),
         Commands::SecretLint { json } => run_secret_lint(&project_path, json),
         Commands::Activate { json } => run_activate(&project_path, json),
@@ -257,8 +305,9 @@ fn main() -> Result<()> {
             bind,
             billing,
             auth_token,
+            auth_store,
             once,
-        } => run_billing_serve(bind, billing, auth_token, once),
+        } => run_billing_serve(bind, billing, auth_token, auth_store, once),
     }
 }
 
@@ -417,13 +466,19 @@ fn run_registry_ls(
 fn run_registry_serve(
     bind: String,
     registry: Option<std::path::PathBuf>,
+    billing: Option<std::path::PathBuf>,
+    enforce_entitlements: bool,
     auth_token: Option<String>,
+    auth_store: Option<PathBuf>,
     once: bool,
 ) -> Result<()> {
     let result = serve_registry_http(registry::ServeOptions {
         registry_root: registry,
+        billing_root: billing,
+        enforce_entitlements,
         bind,
         auth_token,
+        auth_store,
         once,
     })?;
 
@@ -646,6 +701,53 @@ fn run_billing_plan_ls(
             plan.name,
             f64::from(plan.price_per_seat_cents) / 100.0
         );
+    }
+    Ok(())
+}
+
+fn run_entitlement_check(
+    org: String,
+    billing_root: Option<PathBuf>,
+    billing_url: Option<String>,
+    auth_token: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let report = if let Some(url) = billing_url.as_deref() {
+        let subscriptions = billing::list_subscriptions_remote(
+            url,
+            auth_token,
+            billing::ListFilter {
+                org: Some(org.clone()),
+            },
+        )?;
+        billing::entitlement_from_subscriptions(org.clone(), subscriptions)
+    } else {
+        billing::check_entitlement(
+            billing::StoreOptions {
+                billing_root: billing_root.clone(),
+            },
+            &org,
+        )?
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .context("failed to serialize entitlement report as JSON")?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Entitlement org={} entitled={} reason={}",
+        report.org, report.entitled, report.reason
+    );
+    if let Some(plan) = report.plan_id {
+        println!("Plan: {}", plan);
+    }
+    if let Some(seats) = report.seats {
+        println!("Seats: {}", seats);
     }
     Ok(())
 }
@@ -924,12 +1026,14 @@ fn run_billing_serve(
     bind: String,
     billing_root: Option<PathBuf>,
     auth_token: Option<String>,
+    auth_store: Option<PathBuf>,
     once: bool,
 ) -> Result<()> {
     let result = billing::serve_billing_http(billing::ServeOptions {
         billing_root,
         bind,
         auth_token,
+        auth_store,
         once,
     })?;
     println!(
@@ -937,6 +1041,90 @@ fn run_billing_serve(
         result.bind,
         result.billing_root.display(),
         result.requests_handled
+    );
+    Ok(())
+}
+
+fn run_auth_key_create(
+    auth_store: Option<PathBuf>,
+    input: auth::CreateApiKeyInput,
+    json: bool,
+) -> Result<()> {
+    let path = auth::resolve_auth_store_path(auth_store)?;
+    let created = auth::create_api_key(&path, input)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&created)
+                .context("failed to serialize auth key as JSON")?
+        );
+        return Ok(());
+    }
+
+    println!("Created auth key {}", created.id);
+    println!("Store: {}", path.display());
+    println!("Token: {}", created.token);
+    println!("Service: {}", created.service);
+    println!("Scopes: {}", created.scopes.join(", "));
+    if let Some(org) = created.org {
+        println!("Org scope: {}", org);
+    }
+    if let Some(expires_at) = created.expires_at {
+        println!("Expires at: {}", expires_at);
+    }
+    Ok(())
+}
+
+fn run_auth_key_ls(auth_store: Option<PathBuf>, json: bool) -> Result<()> {
+    let path = auth::resolve_auth_store_path(auth_store)?;
+    let keys = auth::list_api_keys(&path)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&keys).context("failed to serialize auth keys as JSON")?
+        );
+        return Ok(());
+    }
+
+    println!("Auth store: {}", path.display());
+    if keys.is_empty() {
+        println!("Keys: none");
+        return Ok(());
+    }
+    println!("Keys:");
+    for key in keys {
+        println!(
+            "- {} subject={} service={} scopes={} active={} rpm={}{}",
+            key.id,
+            key.subject,
+            key.service,
+            key.scopes.join(","),
+            key.active,
+            key.rate_limit_per_minute,
+            key.org
+                .as_deref()
+                .map(|org| format!(" org={}", org))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn run_auth_key_revoke(key_id: String, auth_store: Option<PathBuf>, json: bool) -> Result<()> {
+    let path = auth::resolve_auth_store_path(auth_store)?;
+    let revoked = auth::revoke_api_key(&path, &key_id)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&revoked)
+                .context("failed to serialize revoked auth key as JSON")?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Revoked key {} (subject={}, service={})",
+        revoked.id, revoked.subject, revoked.service
     );
     Ok(())
 }

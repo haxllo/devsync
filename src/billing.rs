@@ -1,3 +1,4 @@
+use crate::auth::{self, AuthorizationRequirement};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ pub struct ServeOptions {
     pub billing_root: Option<PathBuf>,
     pub bind: String,
     pub auth_token: Option<String>,
+    pub auth_store: Option<PathBuf>,
     pub once: bool,
 }
 
@@ -109,6 +111,16 @@ pub struct CreateSubscriptionInput {
 #[derive(Debug, Clone)]
 pub struct ListFilter {
     pub org: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntitlementReport {
+    pub org: String,
+    pub entitled: bool,
+    pub reason: String,
+    pub plan_id: Option<String>,
+    pub seats: Option<u32>,
+    pub status: Option<SubscriptionStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +253,65 @@ pub fn list_subscriptions(options: StoreOptions, filter: ListFilter) -> Result<V
         })
         .collect();
     Ok(subscriptions)
+}
+
+pub fn check_entitlement(options: StoreOptions, org: &str) -> Result<EntitlementReport> {
+    let org = org.trim();
+    if org.is_empty() {
+        bail!("org cannot be empty");
+    }
+    let subscriptions = list_subscriptions(
+        options,
+        ListFilter {
+            org: Some(org.to_string()),
+        },
+    )?;
+    Ok(entitlement_from_subscriptions(
+        org.to_string(),
+        subscriptions,
+    ))
+}
+
+pub fn entitlement_from_subscriptions(
+    org: String,
+    subscriptions: Vec<Subscription>,
+) -> EntitlementReport {
+    if let Some(active) = subscriptions
+        .iter()
+        .find(|subscription| subscription.status == SubscriptionStatus::Active)
+    {
+        return EntitlementReport {
+            org,
+            entitled: true,
+            reason: "active subscription".to_string(),
+            plan_id: Some(active.plan_id.clone()),
+            seats: Some(active.seats),
+            status: Some(active.status.clone()),
+        };
+    }
+
+    if let Some(canceled) = subscriptions
+        .iter()
+        .find(|subscription| subscription.status == SubscriptionStatus::Canceled)
+    {
+        return EntitlementReport {
+            org,
+            entitled: false,
+            reason: "subscription is canceled".to_string(),
+            plan_id: Some(canceled.plan_id.clone()),
+            seats: Some(canceled.seats),
+            status: Some(canceled.status.clone()),
+        };
+    }
+
+    EntitlementReport {
+        org,
+        entitled: false,
+        reason: "no subscription found".to_string(),
+        plan_id: None,
+        seats: None,
+        status: None,
+    }
 }
 
 pub fn run_cycle(options: StoreOptions, at: Option<&str>) -> Result<CycleResult> {
@@ -505,6 +576,14 @@ pub fn serve_billing_http(options: ServeOptions) -> Result<ServeResult> {
     fs::create_dir_all(&billing_root)
         .with_context(|| format!("failed to create {}", billing_root.display()))?;
     let auth_token = resolve_auth_token(options.auth_token);
+    let auth_runtime = match options.auth_store {
+        Some(path) => Some(
+            auth::init_runtime(&path)
+                .with_context(|| format!("failed to load auth store {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let mut rate_limiter = auth::RateLimiter::default();
 
     let listener = TcpListener::bind(&options.bind)
         .with_context(|| format!("failed to bind {}", options.bind))?;
@@ -512,7 +591,13 @@ pub fn serve_billing_http(options: ServeOptions) -> Result<ServeResult> {
 
     for stream in listener.incoming() {
         let mut stream = stream.context("failed to accept billing connection")?;
-        handle_http_connection(&mut stream, &billing_root, auth_token.as_deref())?;
+        handle_http_connection(
+            &mut stream,
+            &billing_root,
+            auth_token.as_deref(),
+            auth_runtime.as_ref(),
+            &mut rate_limiter,
+        )?;
         requests_handled += 1;
         if options.once {
             break;
@@ -785,81 +870,263 @@ fn handle_http_connection(
     stream: &mut TcpStream,
     billing_root: &Path,
     required_auth_token: Option<&str>,
+    auth_runtime: Option<&auth::AuthRuntime>,
+    rate_limiter: &mut auth::RateLimiter,
 ) -> Result<()> {
     let request = read_http_request(stream)?;
-    if let Some(expected) = required_auth_token {
-        let provided = request
-            .header("authorization")
-            .and_then(extract_bearer_token);
-        if provided != Some(expected) {
-            let response = HttpResponse::json(
-                401,
-                "Unauthorized",
-                br#"{"error":"unauthorized","message":"missing or invalid bearer token"}"#.to_vec(),
-            );
-            write_http_response(stream, &response)?;
-            return Ok(());
-        }
-    }
+    let bearer_token = request
+        .header("authorization")
+        .and_then(auth::extract_bearer_token);
 
-    let response = match (request.method.as_str(), request.path.as_str()) {
+    let (response, identity, target_org) = match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/v1/billing/plans/list") => {
-            handle_json_response(list_plans(StoreOptions { billing_root: Some(billing_root.to_path_buf()) }))
+            match authorize_billing_request(
+                auth_runtime,
+                required_auth_token,
+                bearer_token,
+                "billing.read",
+                None,
+                false,
+            ) {
+                Ok(identity) => {
+                    if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                        (
+                            too_many_requests_response(identity.rate_limit_per_minute),
+                            Some(identity),
+                            None,
+                        )
+                    } else {
+                        (
+                            handle_json_response(list_plans(StoreOptions {
+                                billing_root: Some(billing_root.to_path_buf()),
+                            })),
+                            Some(identity),
+                            None,
+                        )
+                    }
+                }
+                Err(response) => (response, None, None),
+            }
         }
         ("POST", "/v1/billing/subscriptions/create") => {
-            let payload: ApiCreateSubscriptionRequest =
-                serde_json::from_slice(&request.body).context("invalid create subscription payload")?;
-            handle_json_response(create_or_update_subscription(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                CreateSubscriptionInput {
-                    org: payload.org,
-                    plan_id: payload.plan,
-                    seats: payload.seats,
-                    customer_email: payload.customer_email,
-                },
-            ))
+            match serde_json::from_slice::<ApiCreateSubscriptionRequest>(&request.body) {
+                Ok(payload) => {
+                    let org = payload.org.clone();
+                    match authorize_billing_request(
+                        auth_runtime,
+                        required_auth_token,
+                        bearer_token,
+                        "billing.write",
+                        Some(&org),
+                        false,
+                    ) {
+                        Ok(identity) => {
+                            if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                                (
+                                    too_many_requests_response(identity.rate_limit_per_minute),
+                                    Some(identity),
+                                    Some(org),
+                                )
+                            } else {
+                                (
+                                    handle_json_response(create_or_update_subscription(
+                                        StoreOptions {
+                                            billing_root: Some(billing_root.to_path_buf()),
+                                        },
+                                        CreateSubscriptionInput {
+                                            org: payload.org,
+                                            plan_id: payload.plan,
+                                            seats: payload.seats,
+                                            customer_email: payload.customer_email,
+                                        },
+                                    )),
+                                    Some(identity),
+                                    Some(org),
+                                )
+                            }
+                        }
+                        Err(response) => (response, None, Some(org)),
+                    }
+                }
+                Err(err) => (
+                    bad_request_response(format!("invalid create subscription payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
         ("POST", "/v1/billing/subscriptions/list") => {
             let payload: ApiListFilterRequest =
                 serde_json::from_slice(&request.body).unwrap_or(ApiListFilterRequest { org: None });
-            handle_json_response(list_subscriptions(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                ListFilter { org: payload.org },
-            ))
+            let (scope, org, require_unscoped) = match payload.org.clone() {
+                Some(org) => ("billing.read", Some(org), false),
+                None => ("billing.admin", None, true),
+            };
+            match authorize_billing_request(
+                auth_runtime,
+                required_auth_token,
+                bearer_token,
+                scope,
+                org.as_deref(),
+                require_unscoped,
+            ) {
+                Ok(identity) => {
+                    if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                        (
+                            too_many_requests_response(identity.rate_limit_per_minute),
+                            Some(identity),
+                            org,
+                        )
+                    } else {
+                        (
+                            handle_json_response(list_subscriptions(
+                                StoreOptions {
+                                    billing_root: Some(billing_root.to_path_buf()),
+                                },
+                                ListFilter {
+                                    org: payload.org.clone(),
+                                },
+                            )),
+                            Some(identity),
+                            org,
+                        )
+                    }
+                }
+                Err(response) => (response, None, org),
+            }
         }
         ("POST", "/v1/billing/cycle/run") => {
             let payload: ApiRunCycleRequest =
                 serde_json::from_slice(&request.body).unwrap_or(ApiRunCycleRequest { at: None });
-            handle_json_response(run_cycle(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                payload.at.as_deref(),
-            ))
+            match authorize_billing_request(
+                auth_runtime,
+                required_auth_token,
+                bearer_token,
+                "billing.admin",
+                None,
+                true,
+            ) {
+                Ok(identity) => {
+                    if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                        (
+                            too_many_requests_response(identity.rate_limit_per_minute),
+                            Some(identity),
+                            None,
+                        )
+                    } else {
+                        (
+                            handle_json_response(run_cycle(
+                                StoreOptions {
+                                    billing_root: Some(billing_root.to_path_buf()),
+                                },
+                                payload.at.as_deref(),
+                            )),
+                            Some(identity),
+                            None,
+                        )
+                    }
+                }
+                Err(response) => (response, None, None),
+            }
         }
         ("POST", "/v1/billing/invoices/list") => {
             let payload: ApiListFilterRequest =
                 serde_json::from_slice(&request.body).unwrap_or(ApiListFilterRequest { org: None });
-            handle_json_response(list_invoices(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                ListFilter { org: payload.org },
-            ))
+            let (scope, org, require_unscoped) = match payload.org.clone() {
+                Some(org) => ("billing.read", Some(org), false),
+                None => ("billing.admin", None, true),
+            };
+            match authorize_billing_request(
+                auth_runtime,
+                required_auth_token,
+                bearer_token,
+                scope,
+                org.as_deref(),
+                require_unscoped,
+            ) {
+                Ok(identity) => {
+                    if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                        (
+                            too_many_requests_response(identity.rate_limit_per_minute),
+                            Some(identity),
+                            org,
+                        )
+                    } else {
+                        (
+                            handle_json_response(list_invoices(
+                                StoreOptions {
+                                    billing_root: Some(billing_root.to_path_buf()),
+                                },
+                                ListFilter {
+                                    org: payload.org.clone(),
+                                },
+                            )),
+                            Some(identity),
+                            org,
+                        )
+                    }
+                }
+                Err(response) => (response, None, org),
+            }
         }
         ("POST", "/v1/billing/invoices/pay") => {
-            let payload: ApiInvoicePayRequest =
-                serde_json::from_slice(&request.body).context("invalid invoice pay payload")?;
-            handle_json_response(mark_invoice_paid(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                &payload.invoice_id,
-            ))
+            match serde_json::from_slice::<ApiInvoicePayRequest>(&request.body) {
+                Ok(payload) => {
+                    let org = match lookup_invoice_org(billing_root, &payload.invoice_id) {
+                        Ok(Some(org)) => org,
+                        Ok(None) => {
+                            return write_http_response(
+                                stream,
+                                &bad_request_response(format!(
+                                    "invoice `{}` not found",
+                                    payload.invoice_id
+                                )),
+                            )
+                        }
+                        Err(err) => {
+                            return write_http_response(
+                                stream,
+                                &bad_request_response(err.to_string()),
+                            )
+                        }
+                    };
+                    match authorize_billing_request(
+                        auth_runtime,
+                        required_auth_token,
+                        bearer_token,
+                        "billing.write",
+                        Some(&org),
+                        false,
+                    ) {
+                        Ok(identity) => {
+                            if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                                (
+                                    too_many_requests_response(identity.rate_limit_per_minute),
+                                    Some(identity),
+                                    Some(org),
+                                )
+                            } else {
+                                (
+                                    handle_json_response(mark_invoice_paid(
+                                        StoreOptions {
+                                            billing_root: Some(billing_root.to_path_buf()),
+                                        },
+                                        &payload.invoice_id,
+                                    )),
+                                    Some(identity),
+                                    Some(org),
+                                )
+                            }
+                        }
+                        Err(response) => (response, None, Some(org)),
+                    }
+                }
+                Err(err) => (
+                    bad_request_response(format!("invalid invoice pay payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
         ("POST", "/v1/billing/events/list") => {
             let payload: ApiListEventsRequest = serde_json::from_slice(&request.body).unwrap_or(
@@ -868,31 +1135,121 @@ fn handle_http_connection(
                     pending_only: false,
                 },
             );
-            handle_json_response(list_events(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                ListFilter { org: payload.org },
-                payload.pending_only,
-            ))
+            let (scope, org, require_unscoped) = match payload.org.clone() {
+                Some(org) => ("billing.read", Some(org), false),
+                None => ("billing.admin", None, true),
+            };
+            match authorize_billing_request(
+                auth_runtime,
+                required_auth_token,
+                bearer_token,
+                scope,
+                org.as_deref(),
+                require_unscoped,
+            ) {
+                Ok(identity) => {
+                    if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                        (
+                            too_many_requests_response(identity.rate_limit_per_minute),
+                            Some(identity),
+                            org,
+                        )
+                    } else {
+                        (
+                            handle_json_response(list_events(
+                                StoreOptions {
+                                    billing_root: Some(billing_root.to_path_buf()),
+                                },
+                                ListFilter {
+                                    org: payload.org.clone(),
+                                },
+                                payload.pending_only,
+                            )),
+                            Some(identity),
+                            org,
+                        )
+                    }
+                }
+                Err(response) => (response, None, org),
+            }
         }
         ("POST", "/v1/billing/events/ack") => {
-            let payload: ApiAckEventRequest =
-                serde_json::from_slice(&request.body).context("invalid event ack payload")?;
-            handle_json_response(ack_event(
-                StoreOptions {
-                    billing_root: Some(billing_root.to_path_buf()),
-                },
-                &payload.event_id,
-            ))
+            match serde_json::from_slice::<ApiAckEventRequest>(&request.body) {
+                Ok(payload) => {
+                    let org = match lookup_event_org(billing_root, &payload.event_id) {
+                        Ok(Some(org)) => org,
+                        Ok(None) => {
+                            return write_http_response(
+                                stream,
+                                &bad_request_response(format!("event `{}` not found", payload.event_id)),
+                            )
+                        }
+                        Err(err) => {
+                            return write_http_response(
+                                stream,
+                                &bad_request_response(err.to_string()),
+                            )
+                        }
+                    };
+                    match authorize_billing_request(
+                        auth_runtime,
+                        required_auth_token,
+                        bearer_token,
+                        "billing.write",
+                        Some(&org),
+                        false,
+                    ) {
+                        Ok(identity) => {
+                            if !rate_limiter.allow(&identity.key_id, identity.rate_limit_per_minute) {
+                                (
+                                    too_many_requests_response(identity.rate_limit_per_minute),
+                                    Some(identity),
+                                    Some(org),
+                                )
+                            } else {
+                                (
+                                    handle_json_response(ack_event(
+                                        StoreOptions {
+                                            billing_root: Some(billing_root.to_path_buf()),
+                                        },
+                                        &payload.event_id,
+                                    )),
+                                    Some(identity),
+                                    Some(org),
+                                )
+                            }
+                        }
+                        Err(response) => (response, None, Some(org)),
+                    }
+                }
+                Err(err) => (
+                    bad_request_response(format!("invalid event ack payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
-        _ => HttpResponse::json(
-            404,
-            "Not Found",
-            br#"{"error":"not found","routes":["POST /v1/billing/plans/list","POST /v1/billing/subscriptions/create","POST /v1/billing/subscriptions/list","POST /v1/billing/cycle/run","POST /v1/billing/invoices/list","POST /v1/billing/invoices/pay","POST /v1/billing/events/list","POST /v1/billing/events/ack"]}"#
-                .to_vec(),
+        _ => (
+            HttpResponse::json(
+                404,
+                "Not Found",
+                br#"{"error":"not found","routes":["POST /v1/billing/plans/list","POST /v1/billing/subscriptions/create","POST /v1/billing/subscriptions/list","POST /v1/billing/cycle/run","POST /v1/billing/invoices/list","POST /v1/billing/invoices/pay","POST /v1/billing/events/list","POST /v1/billing/events/ack"]}"#
+                    .to_vec(),
+            ),
+            None,
+            None,
         ),
     };
+
+    if let Err(err) = append_access_log(
+        billing_root,
+        &request,
+        response.status_code,
+        identity.as_ref(),
+        target_org.as_deref(),
+    ) {
+        eprintln!("failed to write billing access log: {}", err);
+    }
 
     write_http_response(stream, &response)?;
     Ok(())
@@ -914,6 +1271,140 @@ fn handle_json_response<T: Serialize>(result: Result<T>) -> HttpResponse {
             format!("{{\"error\":\"bad_request\",\"message\":\"{}\"}}", err).into_bytes(),
         ),
     }
+}
+
+fn bad_request_response(message: String) -> HttpResponse {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": "bad_request",
+        "message": message,
+    }))
+    .unwrap_or_else(|_| br#"{"error":"bad_request"}"#.to_vec());
+    HttpResponse::json(400, "Bad Request", body)
+}
+
+fn too_many_requests_response(limit: u32) -> HttpResponse {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": "rate_limited",
+        "message": format!("rate limit exceeded ({} requests/minute)", limit.max(1)),
+    }))
+    .unwrap_or_else(|_| br#"{"error":"rate_limited"}"#.to_vec());
+    HttpResponse::json(429, "Too Many Requests", body)
+}
+
+fn authorize_billing_request(
+    auth_runtime: Option<&auth::AuthRuntime>,
+    required_auth_token: Option<&str>,
+    bearer_token: Option<&str>,
+    scope: &str,
+    target_org: Option<&str>,
+    require_unscoped_key: bool,
+) -> std::result::Result<auth::AccessIdentity, HttpResponse> {
+    match auth::authorize(
+        auth_runtime,
+        required_auth_token,
+        bearer_token,
+        AuthorizationRequirement {
+            service: "billing",
+            scope,
+            target_org,
+            require_unscoped_key,
+        },
+    ) {
+        Ok(identity) => Ok(identity),
+        Err(decision) => {
+            let status = decision.status_code();
+            let status_text = if status == 401 {
+                "Unauthorized"
+            } else {
+                "Forbidden"
+            };
+            let error = if status == 401 {
+                "unauthorized"
+            } else {
+                "forbidden"
+            };
+            let body = serde_json::to_vec(&serde_json::json!({
+                "error": error,
+                "message": decision.message(),
+            }))
+            .unwrap_or_else(|_| br#"{"error":"unauthorized"}"#.to_vec());
+            Err(HttpResponse::json(status, status_text, body))
+        }
+    }
+}
+
+fn lookup_invoice_org(billing_root: &Path, invoice_id: &str) -> Result<Option<String>> {
+    let invoices = list_invoices(
+        StoreOptions {
+            billing_root: Some(billing_root.to_path_buf()),
+        },
+        ListFilter { org: None },
+    )?;
+    Ok(invoices
+        .into_iter()
+        .find(|invoice| invoice.id == invoice_id)
+        .map(|invoice| invoice.org))
+}
+
+fn lookup_event_org(billing_root: &Path, event_id: &str) -> Result<Option<String>> {
+    let events = list_events(
+        StoreOptions {
+            billing_root: Some(billing_root.to_path_buf()),
+        },
+        ListFilter { org: None },
+        false,
+    )?;
+    Ok(events
+        .into_iter()
+        .find(|event| event.id == event_id)
+        .map(|event| event.org))
+}
+
+#[derive(Debug, Serialize)]
+struct AccessLogEntry {
+    occurred_at: String,
+    method: String,
+    path: String,
+    status_code: u16,
+    subject: String,
+    key_id: String,
+    org: Option<String>,
+}
+
+fn append_access_log(
+    billing_root: &Path,
+    request: &HttpRequest,
+    status_code: u16,
+    identity: Option<&auth::AccessIdentity>,
+    target_org: Option<&str>,
+) -> Result<()> {
+    let access_path = billing_root.join("access.log");
+    let mut writer = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&access_path)
+        .with_context(|| format!("failed to open {}", access_path.display()))?;
+
+    let entry = AccessLogEntry {
+        occurred_at: Utc::now().to_rfc3339(),
+        method: request.method.clone(),
+        path: request.path.clone(),
+        status_code,
+        subject: identity
+            .map(|value| value.subject.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        key_id: identity
+            .map(|value| value.key_id.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        org: target_org
+            .map(ToString::to_string)
+            .or_else(|| identity.and_then(|value| value.org.clone())),
+    };
+    let line = serde_json::to_string(&entry).context("failed to serialize access log entry")?;
+    use std::io::Write as _;
+    writeln!(writer, "{line}")
+        .with_context(|| format!("failed to write {}", access_path.display()))?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1075,13 +1566,6 @@ fn split_http_response(bytes: &[u8]) -> Result<(u16, &[u8])> {
         .with_context(|| format!("invalid status code `{}`", code))?;
 
     Ok((status_code, &bytes[header_end + 4..]))
-}
-
-fn extract_bearer_token(raw: &str) -> Option<&str> {
-    raw.strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
 }
 
 #[cfg(test)]

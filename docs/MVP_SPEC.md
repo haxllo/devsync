@@ -14,6 +14,9 @@ This document defines the v0.1 CLI scope and acceptance criteria for DevSync.
 - Secret exposure linting for generated artifacts
 - Registry audit logs for create/update/use/list events
 - Optional bearer-token auth for HTTP registry access
+- Scoped API-key auth store for registry/billing HTTP APIs
+- Per-key/org route authorization and in-process rate limiting for HTTP servers
+- Org entitlement checks for registry routes (optional enforcement mode)
 - Activation readiness report for onboarding guidance
 - ROI estimator command for sales/pilot value modeling
 - Dashboard export for GTM reporting across repositories
@@ -117,6 +120,17 @@ Behavior:
 - provide HTTP API surface via `billing-serve`
 - support local store mode (`--billing`) and remote API mode (`--billing-url`)
 
+### `devsync auth-key-create|auth-key-ls|auth-key-revoke`
+Behavior:
+- manage file-backed API keys (`~/.devsync/auth_keys.toml` by default)
+- create keys with service binding (`registry`/`billing`/`*`), scopes, optional org scope, TTL, and rate limit
+- revoke keys without deleting history
+
+### `devsync entitlement-check <org>`
+Behavior:
+- evaluates whether org has active subscription entitlement
+- supports local billing store mode and remote billing API mode
+
 ### `devsync push <org/project@version>`
 Behavior:
 - read local `devsync.lock`
@@ -156,6 +170,9 @@ Behavior:
 Behavior:
 - bind a local HTTP API over file-backed registry data
 - optionally require bearer token on all routes
+- optionally enforce scoped API keys from auth store (`--auth-store`)
+- optionally enforce active org entitlement (`--enforce-entitlements`, billing-backed)
+- apply per-key requests/minute limiting and write access logs
 - routes:
   - `POST /v1/push`
   - `POST /v1/pull`
@@ -166,6 +183,8 @@ Behavior:
 Behavior:
 - bind local billing HTTP API over file-backed billing data
 - optionally require bearer token on all routes
+- optionally enforce scoped API keys from auth store (`--auth-store`)
+- apply per-key requests/minute limiting and write access logs
 - routes:
   - `POST /v1/billing/plans/list`
   - `POST /v1/billing/subscriptions/create`

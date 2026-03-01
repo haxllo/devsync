@@ -35,6 +35,10 @@ Implemented commands:
 - `devsync registry-ls`
 - `devsync registry-audit`
 - `devsync registry-serve`
+- `devsync auth-key-create`
+- `devsync auth-key-ls`
+- `devsync auth-key-revoke`
+- `devsync entitlement-check`
 - `devsync billing-plan-ls`
 - `devsync billing-subscribe`
 - `devsync billing-subscription-ls`
@@ -209,8 +213,40 @@ Runs a local HTTP registry server backed by the file registry layout.
 Flags:
 - `--bind <addr>` bind address (default `127.0.0.1:8787`)
 - `--registry <path>` registry root (defaults to `~/.devsync/registry`)
+- `--billing <path>` billing store root for entitlement checks (defaults to `~/.devsync/billing`)
+- `--enforce-entitlements` require active org subscription for registry routes
 - `--auth-token <token>` require bearer token for all HTTP routes
+- `--auth-store <path>` load scoped API keys (created via `auth-key-*`)
 - `--once` handle one request then exit (useful for smoke tests)
+
+### `devsync auth-key-create`
+Creates an API key for `registry-serve` and/or `billing-serve`.
+
+Flags:
+- `--auth-store <path>` auth key store path (defaults to `~/.devsync/auth_keys.toml`)
+- `--subject <name>` subject label for audit/access logs
+- `--service <registry|billing|*>` service binding (default `*`)
+- `--org <org>` optional org binding
+- `--scope <scope>` repeatable scope (`registry.read`, `registry.write`, `registry.admin`, `billing.read`, `billing.write`, `billing.admin`, `*`)
+- `--ttl-days <n>` optional key expiry in days
+- `--rate-limit-rpm <n>` per-key requests per minute (default `120`)
+- `--note <text>` optional operator note
+- `--json` machine-readable output
+
+### `devsync auth-key-ls`
+Lists API keys from auth store.
+
+### `devsync auth-key-revoke <key_id>`
+Revokes an API key in auth store.
+
+### `devsync entitlement-check <org>`
+Checks whether an org currently has active entitlement.
+
+Flags:
+- `--billing <path>` local billing store
+- `--billing-url <url>` remote billing API
+- `--auth-token <token>` bearer token for remote mode
+- `--json` machine-readable output
 
 ### Billing Commands
 
@@ -227,7 +263,7 @@ Each billing client command can run in:
 - `devsync billing-invoice-pay <invoice_id>`
 - `devsync billing-events [--org <org>] [--pending-only]`
 - `devsync billing-event-ack <event_id>`
-- `devsync billing-serve --bind 127.0.0.1:8795 [--auth-token <token>]`
+- `devsync billing-serve --bind 127.0.0.1:8795 [--auth-token <token>] [--auth-store <path>]`
 
 Remote billing example:
 
@@ -250,6 +286,11 @@ Billing API routes (`billing-serve`):
 - `POST /v1/billing/invoices/pay`
 - `POST /v1/billing/events/list`
 - `POST /v1/billing/events/ack`
+
+Auth notes for HTTP servers:
+- if neither `--auth-token` nor `--auth-store` is set, routes are unauthenticated (local/dev mode)
+- `--auth-token` keeps simple shared-token behavior
+- `--auth-store` enables scoped API keys + org boundaries + per-key rate limits + access logging
 
 ## Policy File
 

@@ -14,8 +14,9 @@ Data flow:
 8. `roi`: compute pilot/business ROI estimate
 9. `dashboard`: aggregate multi-repo activation + ROI reporting
 10. `billing`: file-backed plans/subscriptions/invoices/events + HTTP API
-11. `registry`: publish/pull/list/audit environment versions
-12. `up`: delegate environment startup to existing container tooling
+11. `auth`: API key store, scope/org authorization, per-key rate limiting
+12. `registry`: publish/pull/list/audit environment versions
+13. `up`: delegate environment startup to existing container tooling
 
 ## Module Map
 
@@ -41,12 +42,14 @@ Data flow:
   - root-level repository aggregation for GTM dashboard JSON export
 - `src/billing.rs`
   - self-serve billing backend slice and local billing HTTP API
+- `src/auth.rs`
+  - API key lifecycle (create/list/revoke), scope/org auth decisions, in-memory rate limiter
 - `src/up.rs`
   - launch flow for dev environment startup
 - `src/main.rs`
   - command orchestration and output
 - `src/registry.rs`
-  - phase-2/3 team registry backend, audit logging, HTTP auth token support
+  - phase-2/3 team registry backend, audit logging, HTTP auth token + API-key auth support
 
 ## Key Design Decisions
 
@@ -73,6 +76,11 @@ Data flow:
 6. Token-based auth hook for remote registry.
 - optional bearer token required by `registry-serve`
 - enables SSO-proxied deployments without coupling CLI to a specific IdP SDK
+
+7. API-key auth and rate limiting for local HTTP services.
+- optional file-backed key store (`auth_keys.toml`) with scopes and org-bound keys
+- per-key request throttling to reduce abuse in shared pilot environments
+- append-only access logs for billing/registry HTTP routes (`access.log`)
 
 ## Security and Privacy Defaults
 
@@ -121,3 +129,6 @@ Current phase-4 slice:
 - `devsync roi` commercial value model for onboarding + drift reduction scenarios
 - `devsync dashboard-export` for aggregated GTM reporting
 - billing command/API slice (`billing-*`, `billing-serve`) with webhook-ready event outbox
+- auth key lifecycle commands (`auth-key-create`, `auth-key-ls`, `auth-key-revoke`)
+- scoped API-key auth + rate limiting + HTTP access logs for `registry-serve` and `billing-serve`
+- entitlement checks (`entitlement-check`) and optional registry route enforcement (`--enforce-entitlements`)

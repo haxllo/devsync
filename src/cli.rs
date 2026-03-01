@@ -154,12 +154,88 @@ pub enum Commands {
         /// Optional registry root path. Defaults to `~/.devsync/registry`.
         #[arg(long)]
         registry: Option<PathBuf>,
+        /// Optional billing storage root used for entitlement checks.
+        #[arg(long)]
+        billing: Option<PathBuf>,
+        /// Enforce org entitlement before serving registry routes.
+        #[arg(long)]
+        enforce_entitlements: bool,
         /// Optional bearer token required for all HTTP API requests.
         #[arg(long)]
         auth_token: Option<String>,
+        /// Optional API key store path for scoped auth keys.
+        #[arg(long)]
+        auth_store: Option<PathBuf>,
         /// Handle a single request then exit (for smoke tests).
         #[arg(long)]
         once: bool,
+    },
+    /// Create an API key for registry/billing HTTP APIs.
+    AuthKeyCreate {
+        /// Optional auth key store path (defaults to `~/.devsync/auth_keys.toml`).
+        #[arg(long)]
+        auth_store: Option<PathBuf>,
+        /// Subject label for this key (e.g. service account name).
+        #[arg(long)]
+        subject: String,
+        /// Service scope: `registry`, `billing`, or `*`.
+        #[arg(long, default_value = "*")]
+        service: String,
+        /// Optional org binding for least-privilege access.
+        #[arg(long)]
+        org: Option<String>,
+        /// Permission scopes. Repeatable (`registry.read`, `registry.write`, `registry.admin`, `billing.read`, `billing.write`, `billing.admin`, `*`).
+        #[arg(long = "scope", required = true)]
+        scopes: Vec<String>,
+        /// Optional TTL in days.
+        #[arg(long)]
+        ttl_days: Option<i64>,
+        /// Requests-per-minute limit for this key.
+        #[arg(long, default_value_t = 120)]
+        rate_limit_rpm: u32,
+        /// Optional operator note.
+        #[arg(long)]
+        note: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List API keys from auth store.
+    AuthKeyLs {
+        /// Optional auth key store path (defaults to `~/.devsync/auth_keys.toml`).
+        #[arg(long)]
+        auth_store: Option<PathBuf>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke an API key.
+    AuthKeyRevoke {
+        /// API key id (for example `key_...`).
+        key_id: String,
+        /// Optional auth key store path (defaults to `~/.devsync/auth_keys.toml`).
+        #[arg(long)]
+        auth_store: Option<PathBuf>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check whether an org currently has active entitlement.
+    EntitlementCheck {
+        /// Organization identifier.
+        org: String,
+        /// Optional billing storage root (defaults to `~/.devsync/billing`).
+        #[arg(long)]
+        billing: Option<PathBuf>,
+        /// Optional billing HTTP base URL (for example `http://127.0.0.1:8795`).
+        #[arg(long, conflicts_with = "billing")]
+        billing_url: Option<String>,
+        /// Optional bearer token for remote billing auth (or `DEVSYNC_AUTH_TOKEN` env var).
+        #[arg(long)]
+        auth_token: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
     /// Validate governance policies for generated environment artifacts.
     Policy {
@@ -415,6 +491,9 @@ pub enum Commands {
         /// Optional bearer token required for all HTTP API requests.
         #[arg(long)]
         auth_token: Option<String>,
+        /// Optional API key store path for scoped auth keys.
+        #[arg(long)]
+        auth_store: Option<PathBuf>,
         /// Handle a single request then exit (for smoke tests).
         #[arg(long)]
         once: bool,

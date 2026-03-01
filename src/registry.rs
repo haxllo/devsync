@@ -1,3 +1,5 @@
+use crate::auth::{self, AuthorizationRequirement};
+use crate::billing;
 use crate::devcontainer;
 use crate::lockfile::{DevsyncLock, read_lock, write_lock};
 use anyhow::{Context, Result, bail};
@@ -145,8 +147,11 @@ pub struct PullResult {
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
     pub registry_root: Option<PathBuf>,
+    pub billing_root: Option<PathBuf>,
+    pub enforce_entitlements: bool,
     pub bind: String,
     pub auth_token: Option<String>,
+    pub auth_store: Option<PathBuf>,
     pub once: bool,
 }
 
@@ -699,6 +704,19 @@ pub fn serve_registry_http(options: ServeOptions) -> Result<ServeResult> {
     fs::create_dir_all(&registry_root)
         .with_context(|| format!("failed to create {}", registry_root.display()))?;
     let auth_token = resolve_auth_token(options.auth_token);
+    let entitlement_billing_root = if options.enforce_entitlements {
+        Some(billing::resolve_billing_root(options.billing_root)?)
+    } else {
+        None
+    };
+    let auth_runtime = match options.auth_store {
+        Some(path) => Some(
+            auth::init_runtime(&path)
+                .with_context(|| format!("failed to load auth store {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let mut rate_limiter = auth::RateLimiter::default();
 
     let listener = TcpListener::bind(&options.bind)
         .with_context(|| format!("failed to bind {}", options.bind))?;
@@ -706,7 +724,15 @@ pub fn serve_registry_http(options: ServeOptions) -> Result<ServeResult> {
 
     for stream in listener.incoming() {
         let mut stream = stream.context("failed to accept registry connection")?;
-        handle_registry_http_connection(&mut stream, &registry_root, auth_token.as_deref())?;
+        handle_registry_http_connection(
+            &mut stream,
+            &registry_root,
+            auth_token.as_deref(),
+            auth_runtime.as_ref(),
+            entitlement_billing_root.as_deref(),
+            options.enforce_entitlements,
+            &mut rate_limiter,
+        )?;
         requests_handled += 1;
 
         if options.once {
@@ -949,113 +975,495 @@ fn handle_registry_http_connection(
     stream: &mut TcpStream,
     registry_root: &Path,
     required_auth_token: Option<&str>,
+    auth_runtime: Option<&auth::AuthRuntime>,
+    entitlement_billing_root: Option<&Path>,
+    enforce_entitlements: bool,
+    rate_limiter: &mut auth::RateLimiter,
 ) -> Result<()> {
     let request = read_http_request(stream)?;
-    if let Some(expected) = required_auth_token {
-        let provided = request
-            .header("authorization")
-            .and_then(extract_bearer_token);
-        if provided != Some(expected) {
-            let response = HttpResponse::unauthorized_json(
-                br#"{"error":"unauthorized","message":"missing or invalid bearer token"}"#.to_vec(),
-            );
-            write_http_response(stream, &response)?;
-            return Ok(());
-        }
-    }
+    let bearer_token = request
+        .header("authorization")
+        .and_then(auth::extract_bearer_token);
 
-    let response = match (request.method.as_str(), request.path.as_str()) {
+    let (response, identity, target_org) = match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/v1/push") => {
-            let payload: RemotePushRequest =
-                serde_json::from_slice(&request.body).context("invalid push request payload")?;
-            let target = parse_target(&payload.target)?;
-            let result = push_lock_to_registry(
-                payload.lock,
-                &target,
-                PushOptions {
-                    registry_root: Some(registry_root.to_path_buf()),
-                    actor: payload.actor,
-                    grants: payload.grants,
-                    prebuild_cache: payload.prebuild_cache,
-                    auth_token: None,
-                    force: payload.force,
+            match serde_json::from_slice::<RemotePushRequest>(&request.body) {
+                Ok(payload) => match parse_target(&payload.target) {
+                    Ok(target) => {
+                        let target_org = target.org.clone();
+                        match authorize_registry_request(
+                            auth_runtime,
+                            required_auth_token,
+                            bearer_token,
+                            "registry.write",
+                            Some(&target_org),
+                            false,
+                        ) {
+                            Ok(identity) => {
+                                if let Err(response) = enforce_registry_entitlement(
+                                    entitlement_billing_root,
+                                    enforce_entitlements,
+                                    &target_org,
+                                ) {
+                                    (response, Some(identity), Some(target_org))
+                                } else if !rate_limiter.allow(
+                                    &identity.key_id,
+                                    identity.rate_limit_per_minute,
+                                ) {
+                                    (
+                                        too_many_requests_response(identity.rate_limit_per_minute),
+                                        Some(identity),
+                                        Some(target_org),
+                                    )
+                                } else {
+                                    match push_lock_to_registry(
+                                        payload.lock,
+                                        &target,
+                                        PushOptions {
+                                            registry_root: Some(registry_root.to_path_buf()),
+                                            actor: payload.actor,
+                                            grants: payload.grants,
+                                            prebuild_cache: payload.prebuild_cache,
+                                            auth_token: None,
+                                            force: payload.force,
+                                        },
+                                    ) {
+                                        Ok(result) => {
+                                            let body = serde_json::to_vec(&RemotePushResponse {
+                                                org: result.org,
+                                                project: result.project,
+                                                version: result.version,
+                                                prebuild_cache: result.prebuild_cache,
+                                            })
+                                            .unwrap_or_else(|err| {
+                                                serde_json::to_vec(&serde_json::json!({
+                                                    "error": "serialization",
+                                                    "message": err.to_string(),
+                                                }))
+                                                .unwrap_or_default()
+                                            });
+                                            (HttpResponse::ok_json(body), Some(identity), Some(target_org))
+                                        }
+                                        Err(err) => (
+                                            bad_request_response(err.to_string()),
+                                            Some(identity),
+                                            Some(target_org),
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(response) => (response, None, Some(target_org)),
+                        }
+                    }
+                    Err(err) => (bad_request_response(err.to_string()), None, None),
                 },
-            )?;
-
-            let body = serde_json::to_vec(&RemotePushResponse {
-                org: result.org,
-                project: result.project,
-                version: result.version,
-                prebuild_cache: result.prebuild_cache,
-            })
-            .context("failed to serialize push response")?;
-            HttpResponse::ok_json(body)
+                Err(err) => (
+                    bad_request_response(format!("invalid push payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
         ("POST", "/v1/pull") => {
-            let payload: RemotePullRequest =
-                serde_json::from_slice(&request.body).context("invalid pull request payload")?;
-            let target = parse_target(&payload.target)?;
-            let entry = fetch_registry_entry(
-                &target,
-                PullOptions {
-                    registry_root: Some(registry_root.to_path_buf()),
-                    actor: payload.actor,
-                    force: true,
-                    with_devcontainer: false,
-                    primary_only: false,
-                    auth_token: None,
+            match serde_json::from_slice::<RemotePullRequest>(&request.body) {
+                Ok(payload) => match parse_target(&payload.target) {
+                    Ok(target) => {
+                        let target_org = target.org.clone();
+                        match authorize_registry_request(
+                            auth_runtime,
+                            required_auth_token,
+                            bearer_token,
+                            "registry.read",
+                            Some(&target_org),
+                            false,
+                        ) {
+                            Ok(identity) => {
+                                if let Err(response) = enforce_registry_entitlement(
+                                    entitlement_billing_root,
+                                    enforce_entitlements,
+                                    &target_org,
+                                ) {
+                                    (response, Some(identity), Some(target_org))
+                                } else if !rate_limiter.allow(
+                                    &identity.key_id,
+                                    identity.rate_limit_per_minute,
+                                ) {
+                                    (
+                                        too_many_requests_response(identity.rate_limit_per_minute),
+                                        Some(identity),
+                                        Some(target_org),
+                                    )
+                                } else {
+                                    match fetch_registry_entry(
+                                        &target,
+                                        PullOptions {
+                                            registry_root: Some(registry_root.to_path_buf()),
+                                            actor: payload.actor,
+                                            force: true,
+                                            with_devcontainer: false,
+                                            primary_only: false,
+                                            auth_token: None,
+                                        },
+                                    ) {
+                                        Ok(entry) => {
+                                            let body = serde_json::to_vec(&RemotePullResponse {
+                                                org: entry.org,
+                                                project: entry.project,
+                                                version: entry.version,
+                                                prebuild_cache: entry.prebuild_cache,
+                                                lock: entry.lock,
+                                            })
+                                            .unwrap_or_else(|err| {
+                                                serde_json::to_vec(&serde_json::json!({
+                                                    "error": "serialization",
+                                                    "message": err.to_string(),
+                                                }))
+                                                .unwrap_or_default()
+                                            });
+                                            (HttpResponse::ok_json(body), Some(identity), Some(target_org))
+                                        }
+                                        Err(err) => (
+                                            bad_request_response(err.to_string()),
+                                            Some(identity),
+                                            Some(target_org),
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(response) => (response, None, Some(target_org)),
+                        }
+                    }
+                    Err(err) => (bad_request_response(err.to_string()), None, None),
                 },
-            )?;
-
-            let body = serde_json::to_vec(&RemotePullResponse {
-                org: entry.org,
-                project: entry.project,
-                version: entry.version,
-                prebuild_cache: entry.prebuild_cache,
-                lock: entry.lock,
-            })
-            .context("failed to serialize pull response")?;
-            HttpResponse::ok_json(body)
+                Err(err) => (
+                    bad_request_response(format!("invalid pull payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
         ("POST", "/v1/list") => {
-            let payload: RemoteListRequest =
-                serde_json::from_slice(&request.body).context("invalid list request payload")?;
-            let project = parse_project_ref(&payload.project)?;
-            let list = list_versions(
-                &project,
-                ListOptions {
-                    registry_root: Some(registry_root.to_path_buf()),
-                    actor: payload.actor,
-                    auth_token: None,
+            match serde_json::from_slice::<RemoteListRequest>(&request.body) {
+                Ok(payload) => match parse_project_ref(&payload.project) {
+                    Ok(project) => {
+                        let target_org = project.org.clone();
+                        match authorize_registry_request(
+                            auth_runtime,
+                            required_auth_token,
+                            bearer_token,
+                            "registry.read",
+                            Some(&target_org),
+                            false,
+                        ) {
+                            Ok(identity) => {
+                                if let Err(response) = enforce_registry_entitlement(
+                                    entitlement_billing_root,
+                                    enforce_entitlements,
+                                    &target_org,
+                                ) {
+                                    (response, Some(identity), Some(target_org))
+                                } else if !rate_limiter.allow(
+                                    &identity.key_id,
+                                    identity.rate_limit_per_minute,
+                                ) {
+                                    (
+                                        too_many_requests_response(identity.rate_limit_per_minute),
+                                        Some(identity),
+                                        Some(target_org),
+                                    )
+                                } else {
+                                    match list_versions(
+                                        &project,
+                                        ListOptions {
+                                            registry_root: Some(registry_root.to_path_buf()),
+                                            actor: payload.actor,
+                                            auth_token: None,
+                                        },
+                                    ) {
+                                        Ok(list) => {
+                                            let body = serde_json::to_vec(&list).unwrap_or_else(|err| {
+                                                serde_json::to_vec(&serde_json::json!({
+                                                    "error": "serialization",
+                                                    "message": err.to_string(),
+                                                }))
+                                                .unwrap_or_default()
+                                            });
+                                            (HttpResponse::ok_json(body), Some(identity), Some(target_org))
+                                        }
+                                        Err(err) => (
+                                            bad_request_response(err.to_string()),
+                                            Some(identity),
+                                            Some(target_org),
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(response) => (response, None, Some(target_org)),
+                        }
+                    }
+                    Err(err) => (bad_request_response(err.to_string()), None, None),
                 },
-            )?;
-            let body = serde_json::to_vec(&list).context("failed to serialize list response")?;
-            HttpResponse::ok_json(body)
+                Err(err) => (
+                    bad_request_response(format!("invalid list payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
         ("POST", "/v1/audit") => {
-            let payload: RemoteAuditRequest =
-                serde_json::from_slice(&request.body).context("invalid audit request payload")?;
-            let project = parse_project_ref(&payload.project)?;
-            let events = list_audit_events(
-                &project,
-                AuditListOptions {
-                    registry_root: Some(registry_root.to_path_buf()),
-                    actor: payload.actor,
-                    auth_token: None,
-                    limit: payload.limit.max(1),
+            match serde_json::from_slice::<RemoteAuditRequest>(&request.body) {
+                Ok(payload) => match parse_project_ref(&payload.project) {
+                    Ok(project) => {
+                        let target_org = project.org.clone();
+                        match authorize_registry_request(
+                            auth_runtime,
+                            required_auth_token,
+                            bearer_token,
+                            "registry.admin",
+                            Some(&target_org),
+                            false,
+                        ) {
+                            Ok(identity) => {
+                                if let Err(response) = enforce_registry_entitlement(
+                                    entitlement_billing_root,
+                                    enforce_entitlements,
+                                    &target_org,
+                                ) {
+                                    (response, Some(identity), Some(target_org))
+                                } else if !rate_limiter.allow(
+                                    &identity.key_id,
+                                    identity.rate_limit_per_minute,
+                                ) {
+                                    (
+                                        too_many_requests_response(identity.rate_limit_per_minute),
+                                        Some(identity),
+                                        Some(target_org),
+                                    )
+                                } else {
+                                    match list_audit_events(
+                                        &project,
+                                        AuditListOptions {
+                                            registry_root: Some(registry_root.to_path_buf()),
+                                            actor: payload.actor,
+                                            auth_token: None,
+                                            limit: payload.limit.max(1),
+                                        },
+                                    ) {
+                                        Ok(events) => {
+                                            let body = serde_json::to_vec(&events).unwrap_or_else(|err| {
+                                                serde_json::to_vec(&serde_json::json!({
+                                                    "error": "serialization",
+                                                    "message": err.to_string(),
+                                                }))
+                                                .unwrap_or_default()
+                                            });
+                                            (HttpResponse::ok_json(body), Some(identity), Some(target_org))
+                                        }
+                                        Err(err) => (
+                                            bad_request_response(err.to_string()),
+                                            Some(identity),
+                                            Some(target_org),
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(response) => (response, None, Some(target_org)),
+                        }
+                    }
+                    Err(err) => (bad_request_response(err.to_string()), None, None),
                 },
-            )?;
-            let body = serde_json::to_vec(&events).context("failed to serialize audit response")?;
-            HttpResponse::ok_json(body)
+                Err(err) => (
+                    bad_request_response(format!("invalid audit payload: {}", err)),
+                    None,
+                    None,
+                ),
+            }
         }
-        _ => HttpResponse::not_found_json(
-            br#"{"error":"not found","routes":["POST /v1/push","POST /v1/pull","POST /v1/list","POST /v1/audit"]}"#
-                .to_vec(),
+        _ => (
+            HttpResponse::not_found_json(
+                br#"{"error":"not found","routes":["POST /v1/push","POST /v1/pull","POST /v1/list","POST /v1/audit"]}"#
+                    .to_vec(),
+            ),
+            None,
+            None,
         ),
     };
 
-    write_http_response(stream, &response)?;
+    if let Err(err) = append_access_log(
+        registry_root,
+        &request,
+        response.status_code,
+        identity.as_ref(),
+        target_org.as_deref(),
+    ) {
+        eprintln!("failed to write registry access log: {}", err);
+    }
+
+    write_response(stream, response)
+}
+
+fn bad_request_response(message: String) -> HttpResponse {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": "bad_request",
+        "message": message,
+    }))
+    .unwrap_or_else(|_| br#"{"error":"bad_request"}"#.to_vec());
+    HttpResponse::json(400, "Bad Request", body)
+}
+
+fn too_many_requests_response(limit: u32) -> HttpResponse {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": "rate_limited",
+        "message": format!("rate limit exceeded ({} requests/minute)", limit.max(1)),
+    }))
+    .unwrap_or_else(|_| br#"{"error":"rate_limited"}"#.to_vec());
+    HttpResponse::json(429, "Too Many Requests", body)
+}
+
+fn payment_required_response(message: String) -> HttpResponse {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": "payment_required",
+        "message": message,
+    }))
+    .unwrap_or_else(|_| br#"{"error":"payment_required"}"#.to_vec());
+    HttpResponse::json(402, "Payment Required", body)
+}
+
+fn enforce_registry_entitlement(
+    entitlement_billing_root: Option<&Path>,
+    enforce_entitlements: bool,
+    org: &str,
+) -> std::result::Result<(), HttpResponse> {
+    if !enforce_entitlements {
+        return Ok(());
+    }
+    let Some(root) = entitlement_billing_root else {
+        return Err(HttpResponse::json(
+            500,
+            "Internal Server Error",
+            br#"{"error":"misconfigured","message":"entitlement enforcement enabled without billing store"}"#
+                .to_vec(),
+        ));
+    };
+
+    match billing::check_entitlement(
+        billing::StoreOptions {
+            billing_root: Some(root.to_path_buf()),
+        },
+        org,
+    ) {
+        Ok(report) => {
+            if report.entitled {
+                Ok(())
+            } else {
+                Err(payment_required_response(format!(
+                    "organization `{}` is not entitled: {}",
+                    org, report.reason
+                )))
+            }
+        }
+        Err(err) => Err(HttpResponse::json(
+            500,
+            "Internal Server Error",
+            serde_json::to_vec(&serde_json::json!({
+                "error": "entitlement_check_failed",
+                "message": err.to_string(),
+            }))
+            .unwrap_or_else(|_| br#"{"error":"entitlement_check_failed"}"#.to_vec()),
+        )),
+    }
+}
+
+fn authorize_registry_request(
+    auth_runtime: Option<&auth::AuthRuntime>,
+    required_auth_token: Option<&str>,
+    bearer_token: Option<&str>,
+    scope: &str,
+    target_org: Option<&str>,
+    require_unscoped_key: bool,
+) -> std::result::Result<auth::AccessIdentity, HttpResponse> {
+    match auth::authorize(
+        auth_runtime,
+        required_auth_token,
+        bearer_token,
+        AuthorizationRequirement {
+            service: "registry",
+            scope,
+            target_org,
+            require_unscoped_key,
+        },
+    ) {
+        Ok(identity) => Ok(identity),
+        Err(decision) => {
+            let status = decision.status_code();
+            let status_text = if status == 401 {
+                "Unauthorized"
+            } else {
+                "Forbidden"
+            };
+            let error = if status == 401 {
+                "unauthorized"
+            } else {
+                "forbidden"
+            };
+            let body = serde_json::to_vec(&serde_json::json!({
+                "error": error,
+                "message": decision.message(),
+            }))
+            .unwrap_or_else(|_| br#"{"error":"unauthorized"}"#.to_vec());
+            Err(HttpResponse::json(status, status_text, body))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AccessLogEntry {
+    occurred_at: String,
+    method: String,
+    path: String,
+    status_code: u16,
+    subject: String,
+    key_id: String,
+    org: Option<String>,
+}
+
+fn append_access_log(
+    registry_root: &Path,
+    request: &HttpRequest,
+    status_code: u16,
+    identity: Option<&auth::AccessIdentity>,
+    target_org: Option<&str>,
+) -> Result<()> {
+    let access_path = registry_root.join("access.log");
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&access_path)
+        .with_context(|| format!("failed to open {}", access_path.display()))?;
+
+    let entry = AccessLogEntry {
+        occurred_at: Utc::now().to_rfc3339(),
+        method: request.method.clone(),
+        path: request.path.clone(),
+        status_code,
+        subject: identity
+            .map(|value| value.subject.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        key_id: identity
+            .map(|value| value.key_id.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        org: target_org
+            .map(ToString::to_string)
+            .or_else(|| identity.and_then(|value| value.org.clone())),
+    };
+    let line = serde_json::to_string(&entry).context("failed to serialize access log entry")?;
+    writeln!(writer, "{line}")
+        .with_context(|| format!("failed to write {}", access_path.display()))?;
     Ok(())
+}
+
+fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
+    write_http_response(stream, &response)
 }
 
 #[derive(Debug)]
@@ -1093,31 +1501,21 @@ struct HttpResponse {
 }
 
 impl HttpResponse {
-    fn ok_json(body: Vec<u8>) -> Self {
+    fn json(status_code: u16, status_text: &'static str, body: Vec<u8>) -> Self {
         Self {
-            status_code: 200,
-            status_text: "OK",
+            status_code,
+            status_text,
             content_type: "application/json",
             body,
         }
+    }
+
+    fn ok_json(body: Vec<u8>) -> Self {
+        Self::json(200, "OK", body)
     }
 
     fn not_found_json(body: Vec<u8>) -> Self {
-        Self {
-            status_code: 404,
-            status_text: "Not Found",
-            content_type: "application/json",
-            body,
-        }
-    }
-
-    fn unauthorized_json(body: Vec<u8>) -> Self {
-        Self {
-            status_code: 401,
-            status_text: "Unauthorized",
-            content_type: "application/json",
-            body,
-        }
+        Self::json(404, "Not Found", body)
     }
 }
 
@@ -1292,13 +1690,6 @@ fn split_http_response(bytes: &[u8]) -> Result<(u16, &[u8])> {
         .with_context(|| format!("invalid status code `{}`", code_text))?;
 
     Ok((status_code, &bytes[header_end + 4..]))
-}
-
-fn extract_bearer_token(raw: &str) -> Option<&str> {
-    raw.strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
 }
 
 #[cfg(test)]
