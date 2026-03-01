@@ -1,0 +1,3 @@
+schema_version = 1
+approved_base_images = ["mcr.microsoft.com/devcontainers/base:ubuntu-24.04"]
+require_pinned_runtimes = false

@@ -1,0 +1,6 @@
+[project]
+name = "python-uv"
+requires-python = ">=3.11"
+
+[tool.uv]
+dev-dependencies = []

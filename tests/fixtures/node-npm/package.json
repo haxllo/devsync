@@ -1,0 +1,6 @@
+{
+  "name": "node-npm",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "fullstack-next-postgres",
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevSync | Reproducible Dev Environments for Teams</title>
+    <meta
+      name="description"
+      content="DevSync helps engineering teams standardize development environments, enforce policy checks, and reduce onboarding friction with reproducible repo setup."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Sora:wght@500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="#top" aria-label="DevSync home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          DevSync
+        </a>
+        <nav class="nav" aria-label="Primary">
+          <a href="#product">Product</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#trust">Trust</a>
+          <a href="#contact">Contact</a>
+          <a class="cta" href="mailto:mshabeeburrahman786@gmail.com">Request Demo</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="container hero-grid">
+          <article data-reveal>
+            <span class="eyebrow">B2B Developer Tooling</span>
+            <h1>Ship faster by making every teammate run the same environment.</h1>
+            <p class="sub">
+              DevSync scans a repository, generates a deterministic environment baseline, and lets
+              teams share it as versioned infrastructure. No more "works on my machine" fire
+              drills during onboarding.
+            </p>
+            <div class="hero-actions">
+              <a class="cta" href="mailto:mshabeeburrahman786@gmail.com?subject=DevSync%20Pilot">Start Pilot</a>
+              <a class="cta-secondary" href="#pricing">View Pricing</a>
+            </div>
+          </article>
+
+          <aside class="panel hero-card" data-reveal>
+            <div class="signal-row">
+              <div class="signal">
+                <code>devsync init</code>
+                <span class="ok">lock + devcontainer generated</span>
+              </div>
+              <div class="signal">
+                <code>devsync policy</code>
+                <span class="ok">governance checks passing</span>
+              </div>
+              <div class="signal">
+                <code>devsync push acme/api@v4</code>
+                <span class="ok">team registry shared</span>
+              </div>
+            </div>
+            <div class="kpi-grid">
+              <div class="kpi">
+                <div class="v">&lt;10m</div>
+                <div class="l">Time-to-first-working-env target</div>
+              </div>
+              <div class="kpi">
+                <div class="v">-50%</div>
+                <div class="l">Drift incident reduction target</div>
+              </div>
+              <div class="kpi">
+                <div class="v">33</div>
+                <div class="l">Automated tests in current CLI</div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="product">
+        <div class="container">
+          <header class="section-head" data-reveal>
+            <h2>What we sell</h2>
+            <p>
+              DevSync is sold as a software subscription for engineering teams. You get CLI tools,
+              team registry workflows, policy/security checks, audit trails, and onboarding
+              readiness reporting.
+            </p>
+          </header>
+          <div class="cards-3">
+            <article class="card" data-reveal>
+              <h3>Environment Standardization</h3>
+              <p>
+                Generate reproducible environment metadata per repository (`devsync.lock` +
+                `.devcontainer`) with one command.
+              </p>
+            </article>
+            <article class="card" data-reveal>
+              <h3>Governance and Security</h3>
+              <p>
+                Enforce runtime/base-image policies, run secret exposure linting, and maintain
+                auditable environment usage logs.
+              </p>
+            </article>
+            <article class="card" data-reveal>
+              <h3>Team Collaboration</h3>
+              <p>
+                Push and pull versioned environments (`org/project@version`) so every developer and
+                CI runner uses the same baseline.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="container cards-2">
+          <article data-reveal>
+            <header class="section-head">
+              <h2>How customers find us</h2>
+              <p>
+                We acquire customers through open-source CLI adoption, GitHub/docs content, founder
+                outreach, and paid pilot programs with startups and remote engineering teams.
+              </p>
+            </header>
+            <ul class="process">
+              <li>Engineering lead tests DevSync on one active repository.</li>
+              <li>Team pilot runs for 2–4 weeks with onboarding/drift metrics.</li>
+              <li>Organization upgrades to recurring subscription for production use.</li>
+            </ul>
+          </article>
+          <article data-reveal>
+            <header class="section-head">
+              <h2>How we charge</h2>
+              <p>
+                We charge recurring per-developer subscriptions (monthly or annual), with higher
+                tiers for policy governance, audit/security controls, and enterprise support.
+              </p>
+            </header>
+            <div class="card">
+              <h3>Billing model</h3>
+              <ul>
+                <li>Seat-based pricing billed monthly/annually.</li>
+                <li>Invoices and subscription lifecycle managed in-app.</li>
+                <li>Enterprise plans available with contract billing.</li>
+              </ul>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="pricing">
+        <div class="container">
+          <header class="section-head" data-reveal>
+            <h2>Pricing</h2>
+            <p>
+              Start free for local usage, then scale to team and business plans as you need
+              registry workflows, policy packs, and centralized governance.
+            </p>
+          </header>
+          <div class="pricing">
+            <article class="price-card" data-reveal>
+              <div class="tier">Free</div>
+              <div class="amount">$0 <small>/ developer</small></div>
+              <ul>
+                <li>Single-user local CLI</li>
+                <li>Init, doctor, policy, secret-lint</li>
+                <li>Activation and ROI tools</li>
+              </ul>
+            </article>
+            <article class="price-card pop" data-reveal>
+              <div class="tier">Team</div>
+              <div class="amount">$12–18 <small>/ dev / month</small></div>
+              <ul>
+                <li>Team registry sharing</li>
+                <li>Role-based project access</li>
+                <li>Audit events</li>
+              </ul>
+            </article>
+            <article class="price-card" data-reveal>
+              <div class="tier">Business</div>
+              <div class="amount">$29+ <small>/ dev / month</small></div>
+              <ul>
+                <li>Policy packs</li>
+                <li>SSO-ready auth model</li>
+                <li>Extended audit retention</li>
+              </ul>
+            </article>
+            <article class="price-card" data-reveal>
+              <div class="tier">Enterprise</div>
+              <div class="amount">Custom <small>annual contract</small></div>
+              <ul>
+                <li>Private control plane</li>
+                <li>SLA + dedicated support</li>
+                <li>Custom security/compliance controls</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="trust">
+        <div class="container">
+          <header class="section-head" data-reveal>
+            <h2>Trust and compliance</h2>
+            <p>
+              DevSync is designed for security-conscious teams with policy enforcement,
+              secret-safety checks, audit trails, and minimal telemetry defaults.
+            </p>
+          </header>
+          <div class="cards-3">
+            <article class="card" data-reveal>
+              <h3>Policy Enforcement</h3>
+              <p>Approved base images and pinned runtime checks via repository policy files.</p>
+            </article>
+            <article class="card" data-reveal>
+              <h3>Secret Safety</h3>
+              <p>Generated artifact linting prevents accidental credential exposure in workflow files.</p>
+            </article>
+            <article class="card" data-reveal>
+              <h3>Audit Visibility</h3>
+              <p>Environment create/use/list actions are captured for traceability and reviews.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="container">
+          <header class="section-head" data-reveal>
+            <h2>Frequently asked questions</h2>
+          </header>
+          <div class="faq" data-reveal>
+            <details>
+              <summary>Is this only for Docker users?</summary>
+              <p>
+                DevSync integrates with Dev Containers and Docker first for reliability, while
+                still supporting lightweight workflows for teams that avoid full container-heavy
+                setups.
+              </p>
+            </details>
+            <details>
+              <summary>Do you support paid pilots?</summary>
+              <p>
+                Yes. We offer paid pilot engagements for engineering teams that need onboarding
+                acceleration and measurable drift reduction before annual rollout.
+              </p>
+            </details>
+            <details>
+              <summary>Can we use our own security policies?</summary>
+              <p>
+                Yes. Policies are repository-configurable via `devsync.policy.toml`, so each team
+                can match internal engineering standards.
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section id="contact">
+        <div class="container contact">
+          <article class="card" data-reveal>
+            <strong>Contact and support</strong>
+            <p>
+              Sales:
+              <a href="mailto:mshabeeburrahman786@gmail.com"
+                >mshabeeburrahman786@gmail.com</a
+              ><br />
+              Support:
+              <a href="mailto:mshabeeburrahman786@gmail.com"
+                >mshabeeburrahman786@gmail.com</a
+              >
+            </p>
+            <p>
+              Company: DevSync Labs<br />
+              Business hours: Monday–Friday, 09:00–18:00 (UTC)
+            </p>
+          </article>
+          <article class="card" data-reveal>
+            <strong>Legal</strong>
+            <p>Review our legal documents:</p>
+            <div class="legal-links">
+              <a href="privacy.html">Privacy Policy</a>
+              <a href="terms.html">Terms of Service</a>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container">
+        <p>
+          © <span id="year"></span> DevSync Labs. All rights reserved.
+          <a href="privacy.html">Privacy</a> ·
+          <a href="terms.html">Terms</a>
+        </p>
+      </div>
+    </footer>
+
+    <script>
+      document.getElementById("year").textContent = new Date().getFullYear();
+    </script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "eamodio.gitlens",
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  },
+  "name": "DevSync: devsync",
+  "remoteUser": "root"
+}

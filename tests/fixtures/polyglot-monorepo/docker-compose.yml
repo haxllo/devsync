@@ -1,0 +1,5 @@
+services:
+  db:
+    image: mysql:8
+  mongo:
+    image: mongo:7

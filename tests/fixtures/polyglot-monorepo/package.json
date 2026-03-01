@@ -1,0 +1,6 @@
+{
+  "name": "polyglot-monorepo",
+  "engines": {
+    "node": ">=20"
+  }
+}
