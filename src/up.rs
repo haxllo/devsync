@@ -3,13 +3,14 @@ use std::path::Path;
 use std::process::Command;
 
 pub fn run_up(root: &Path) -> Result<()> {
-    maybe_print_buildx_hint();
+    let buildx_ok = docker_buildx_available();
+    maybe_print_buildx_hint(buildx_ok);
 
     if which::which("devcontainer").is_ok() {
         println!("Starting environment with Dev Container CLI...");
         let mut cmd = Command::new("devcontainer");
         cmd.arg("up").arg("--workspace-folder").arg(root);
-        apply_buildkit_env(&mut cmd);
+        apply_buildkit_env(&mut cmd, buildx_ok);
         let status = cmd.status().context("failed to invoke devcontainer CLI")?;
 
         if status.success() {
@@ -44,7 +45,7 @@ pub fn run_up(root: &Path) -> Result<()> {
             .arg("-t")
             .arg(&image_tag)
             .arg(root);
-        apply_buildkit_env(&mut cmd);
+        apply_buildkit_env(&mut cmd, buildx_ok);
         let status = cmd.status().context("failed to invoke docker build")?;
 
         if !status.success() {
@@ -64,30 +65,54 @@ pub fn run_up(root: &Path) -> Result<()> {
     bail!("No supported runtime found. Install `devcontainer` CLI or Docker and retry.");
 }
 
-fn apply_buildkit_env(cmd: &mut Command) {
-    if std::env::var_os("DOCKER_BUILDKIT").is_none() {
+fn apply_buildkit_env(cmd: &mut Command, buildx_ok: bool) {
+    let requested_buildkit = std::env::var("DOCKER_BUILDKIT").ok();
+    let enable_buildkit = match requested_buildkit.as_deref() {
+        Some("0") => false,
+        Some("1") => {
+            if buildx_ok {
+                true
+            } else {
+                println!(
+                    "Hint: DOCKER_BUILDKIT=1 but buildx is unavailable. Falling back to legacy builder."
+                );
+                false
+            }
+        }
+        Some(_) => buildx_ok,
+        None => buildx_ok,
+    };
+
+    if enable_buildkit {
         cmd.env("DOCKER_BUILDKIT", "1");
-    }
-    if std::env::var_os("COMPOSE_DOCKER_CLI_BUILD").is_none() {
         cmd.env("COMPOSE_DOCKER_CLI_BUILD", "1");
+    } else {
+        cmd.env("DOCKER_BUILDKIT", "0");
+        cmd.env("COMPOSE_DOCKER_CLI_BUILD", "0");
     }
 }
 
-fn maybe_print_buildx_hint() {
+fn maybe_print_buildx_hint(buildx_ok: bool) {
     if which::which("docker").is_err() {
         return;
     }
 
-    let buildx_ok = Command::new("docker")
+    if !buildx_ok {
+        println!(
+            "Hint: Docker buildx plugin is not available. DevSync will use the legacy builder."
+        );
+    }
+}
+
+fn docker_buildx_available() -> bool {
+    if which::which("docker").is_err() {
+        return false;
+    }
+
+    Command::new("docker")
         .arg("buildx")
         .arg("version")
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false);
-
-    if !buildx_ok {
-        println!(
-            "Hint: Docker buildx plugin is not available. Install it to remove legacy builder warnings."
-        );
-    }
+        .unwrap_or(false)
 }
