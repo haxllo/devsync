@@ -127,34 +127,46 @@ fn build_dockerfile(lock: &DevsyncLock, primary_only: bool) -> String {
 
 fn build_post_create_command(lock: &DevsyncLock, primary_only: bool) -> Option<String> {
     let mut commands: Vec<String> = Vec::new();
+    let mut install_steps: Vec<String> = Vec::new();
 
     if stack_enabled(lock, "node", primary_only) {
         match lock.package_managers.node.as_deref() {
-            Some("pnpm") => commands.push("corepack enable && pnpm install".to_string()),
-            Some("yarn") => commands.push("corepack enable && yarn install".to_string()),
-            Some("npm") => commands.push("npm install".to_string()),
-            Some("bun") => commands.push("bun install".to_string()),
+            Some("pnpm") => {
+                install_steps.push("corepack enable && HUSKY=0 pnpm install".to_string())
+            }
+            Some("yarn") => {
+                install_steps.push("corepack enable && HUSKY=0 yarn install".to_string())
+            }
+            Some("npm") => install_steps.push("HUSKY=0 npm install".to_string()),
+            Some("bun") => install_steps.push("HUSKY=0 bun install".to_string()),
             _ => {}
         }
     }
 
     if stack_enabled(lock, "python", primary_only) {
         match lock.package_managers.python.as_deref() {
-            Some("uv") => commands.push("uv sync".to_string()),
-            Some("poetry") => commands.push("poetry install".to_string()),
-            Some("pipenv") => commands.push("pipenv install".to_string()),
-            Some("pip") => commands.push("python3 -m pip install -r requirements.txt".to_string()),
+            Some("uv") => install_steps.push("uv sync".to_string()),
+            Some("poetry") => install_steps.push("poetry install".to_string()),
+            Some("pipenv") => install_steps.push("pipenv install".to_string()),
+            Some("pip") => {
+                install_steps.push("python3 -m pip install -r requirements.txt".to_string())
+            }
             _ => {}
         }
     }
 
     if stack_enabled(lock, "rust", primary_only) {
-        commands.push("cargo fetch".to_string());
+        install_steps.push("cargo fetch".to_string());
     }
 
-    if commands.is_empty() {
+    if install_steps.is_empty() {
         None
     } else {
+        commands.push(
+            "git config --global --add safe.directory ${containerWorkspaceFolder} || true"
+                .to_string(),
+        );
+        commands.extend(install_steps);
         Some(commands.join(" && "))
     }
 }
@@ -214,10 +226,12 @@ mod tests {
 
         let default_cmd =
             build_post_create_command(&lock, false).expect("default command expected");
+        assert!(default_cmd.contains("safe.directory"));
         assert!(default_cmd.contains("pnpm install"));
         assert!(default_cmd.contains("cargo fetch"));
 
         let primary_cmd = build_post_create_command(&lock, true).expect("primary command expected");
+        assert!(primary_cmd.contains("safe.directory"));
         assert!(!primary_cmd.contains("pnpm install"));
         assert!(primary_cmd.contains("cargo fetch"));
     }
