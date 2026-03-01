@@ -3,14 +3,14 @@ use std::path::Path;
 use std::process::Command;
 
 pub fn run_up(root: &Path) -> Result<()> {
+    maybe_print_buildx_hint();
+
     if which::which("devcontainer").is_ok() {
         println!("Starting environment with Dev Container CLI...");
-        let status = Command::new("devcontainer")
-            .arg("up")
-            .arg("--workspace-folder")
-            .arg(root)
-            .status()
-            .context("failed to invoke devcontainer CLI")?;
+        let mut cmd = Command::new("devcontainer");
+        cmd.arg("up").arg("--workspace-folder").arg(root);
+        apply_buildkit_env(&mut cmd);
+        let status = cmd.status().context("failed to invoke devcontainer CLI")?;
 
         if status.success() {
             println!("Environment started successfully.");
@@ -37,15 +37,15 @@ pub fn run_up(root: &Path) -> Result<()> {
         );
 
         println!("Dev Container CLI not found; building Docker image fallback...");
-        let status = Command::new("docker")
-            .arg("build")
+        let mut cmd = Command::new("docker");
+        cmd.arg("build")
             .arg("-f")
             .arg(&dockerfile_path)
             .arg("-t")
             .arg(&image_tag)
-            .arg(root)
-            .status()
-            .context("failed to invoke docker build")?;
+            .arg(root);
+        apply_buildkit_env(&mut cmd);
+        let status = cmd.status().context("failed to invoke docker build")?;
 
         if !status.success() {
             bail!("docker build failed with exit code {:?}", status.code());
@@ -62,4 +62,32 @@ pub fn run_up(root: &Path) -> Result<()> {
     }
 
     bail!("No supported runtime found. Install `devcontainer` CLI or Docker and retry.");
+}
+
+fn apply_buildkit_env(cmd: &mut Command) {
+    if std::env::var_os("DOCKER_BUILDKIT").is_none() {
+        cmd.env("DOCKER_BUILDKIT", "1");
+    }
+    if std::env::var_os("COMPOSE_DOCKER_CLI_BUILD").is_none() {
+        cmd.env("COMPOSE_DOCKER_CLI_BUILD", "1");
+    }
+}
+
+fn maybe_print_buildx_hint() {
+    if which::which("docker").is_err() {
+        return;
+    }
+
+    let buildx_ok = Command::new("docker")
+        .arg("buildx")
+        .arg("version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    if !buildx_ok {
+        println!(
+            "Hint: Docker buildx plugin is not available. Install it to remove legacy builder warnings."
+        );
+    }
 }
