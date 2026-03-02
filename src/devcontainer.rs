@@ -132,31 +132,56 @@ fn build_post_create_command(lock: &DevsyncLock, primary_only: bool) -> Option<S
     if stack_enabled(lock, "node", primary_only) {
         match lock.package_managers.node.as_deref() {
             Some("pnpm") => {
-                install_steps.push("corepack enable && HUSKY=0 pnpm install".to_string())
+                install_steps.push(
+                    "if [ -f package.json ]; then corepack enable && HUSKY=0 pnpm install; else echo 'Skipping pnpm install: package.json not found'; fi"
+                        .to_string(),
+                )
             }
             Some("yarn") => {
-                install_steps.push("corepack enable && HUSKY=0 yarn install".to_string())
+                install_steps.push(
+                    "if [ -f package.json ]; then corepack enable && HUSKY=0 yarn install; else echo 'Skipping yarn install: package.json not found'; fi"
+                        .to_string(),
+                )
             }
-            Some("npm") => install_steps.push("HUSKY=0 npm install".to_string()),
-            Some("bun") => install_steps.push("HUSKY=0 bun install".to_string()),
+            Some("npm") => install_steps.push(
+                "if [ -f package.json ]; then HUSKY=0 npm install; else echo 'Skipping npm install: package.json not found'; fi"
+                    .to_string(),
+            ),
+            Some("bun") => install_steps.push(
+                "if [ -f package.json ]; then HUSKY=0 bun install; else echo 'Skipping bun install: package.json not found'; fi"
+                    .to_string(),
+            ),
             _ => {}
         }
     }
 
     if stack_enabled(lock, "python", primary_only) {
         match lock.package_managers.python.as_deref() {
-            Some("uv") => install_steps.push("uv sync".to_string()),
-            Some("poetry") => install_steps.push("poetry install".to_string()),
-            Some("pipenv") => install_steps.push("pipenv install".to_string()),
-            Some("pip") => {
-                install_steps.push("python3 -m pip install -r requirements.txt".to_string())
-            }
+            Some("uv") => install_steps.push(
+                "if [ -f pyproject.toml ] || [ -f uv.lock ]; then uv sync; else echo 'Skipping uv sync: pyproject.toml/uv.lock not found'; fi"
+                    .to_string(),
+            ),
+            Some("poetry") => install_steps.push(
+                "if [ -f pyproject.toml ] || [ -f poetry.lock ]; then poetry install; else echo 'Skipping poetry install: pyproject.toml/poetry.lock not found'; fi"
+                    .to_string(),
+            ),
+            Some("pipenv") => install_steps.push(
+                "if [ -f Pipfile ]; then pipenv install; else echo 'Skipping pipenv install: Pipfile not found'; fi"
+                    .to_string(),
+            ),
+            Some("pip") => install_steps.push(
+                "if [ -f requirements.txt ]; then python3 -m pip install -r requirements.txt; else echo 'Skipping pip install: requirements.txt not found'; fi"
+                    .to_string(),
+            ),
             _ => {}
         }
     }
 
     if stack_enabled(lock, "rust", primary_only) {
-        install_steps.push("cargo fetch".to_string());
+        install_steps.push(
+            "if [ -f Cargo.toml ]; then cargo fetch; else echo 'Skipping cargo fetch: Cargo.toml not found'; fi"
+                .to_string(),
+        );
     }
 
     if install_steps.is_empty() {
@@ -227,6 +252,8 @@ mod tests {
         let default_cmd =
             build_post_create_command(&lock, false).expect("default command expected");
         assert!(default_cmd.contains("safe.directory"));
+        assert!(default_cmd.contains("if [ -f package.json ]"));
+        assert!(default_cmd.contains("if [ -f Cargo.toml ]"));
         assert!(default_cmd.contains("pnpm install"));
         assert!(default_cmd.contains("cargo fetch"));
 
