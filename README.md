@@ -71,6 +71,23 @@ cargo run -- --path /path/to/project init
 - `.devcontainer/devcontainer.json`: Dev Container metadata
 - `.devcontainer/Dockerfile`: baseline build image
 
+## Custom Bootstrap Commands
+
+DevSync can use a custom bootstrap command for `.devcontainer` `postCreateCommand` instead of default installs.
+
+Precedence:
+1. `devsync.config.toml` explicit override
+2. detected repo bootstrap patterns (`package.json` scripts, common shell bootstrap scripts, `Makefile` targets)
+3. default stack installs (`pnpm/yarn/npm/bun install`, `uv/poetry/pipenv/pip`, `cargo fetch`)
+
+Example override:
+
+```toml
+# devsync.config.toml
+[bootstrap]
+command = "pnpm run bootstrap"
+```
+
 ## Command Reference
 
 ### `devsync init`

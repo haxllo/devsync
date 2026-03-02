@@ -24,7 +24,7 @@ pub fn generate_devcontainer(
         "Dockerfile",
     )?;
 
-    let config_json = build_devcontainer_json(lock, primary_only);
+    let config_json = build_devcontainer_json(root, lock, primary_only);
     let serialized = serde_json::to_string_pretty(&config_json)
         .context("failed to serialize devcontainer.json")?;
 
@@ -51,7 +51,11 @@ fn write_if_allowed(path: &Path, content: &str, force: bool, file_label: &str) -
     Ok(())
 }
 
-fn build_devcontainer_json(lock: &DevsyncLock, primary_only: bool) -> serde_json::Value {
+fn build_devcontainer_json(
+    root: &Path,
+    lock: &DevsyncLock,
+    primary_only: bool,
+) -> serde_json::Value {
     let mut extensions = vec!["eamodio.gitlens".to_string()];
     if stack_enabled(lock, "node", primary_only) {
         extensions.push("dbaeumer.vscode-eslint".to_string());
@@ -64,7 +68,7 @@ fn build_devcontainer_json(lock: &DevsyncLock, primary_only: bool) -> serde_json
         extensions.push("rust-lang.rust-analyzer".to_string());
     }
 
-    let post_create_command = build_post_create_command(lock, primary_only);
+    let post_create_command = build_post_create_command(root, lock, primary_only);
 
     let mut json_obj = json!({
         "name": format!("DevSync: {}", lock.project.name),
@@ -125,8 +129,21 @@ fn build_dockerfile(lock: &DevsyncLock, primary_only: bool) -> String {
     dockerfile
 }
 
-fn build_post_create_command(lock: &DevsyncLock, primary_only: bool) -> Option<String> {
+fn build_post_create_command(
+    root: &Path,
+    lock: &DevsyncLock,
+    primary_only: bool,
+) -> Option<String> {
     let mut commands: Vec<String> = Vec::new();
+    commands.push(
+        "git config --global --add safe.directory ${containerWorkspaceFolder} || true".to_string(),
+    );
+
+    if let Some(custom_bootstrap) = detect_custom_bootstrap_command(root, lock, primary_only) {
+        commands.push(custom_bootstrap);
+        return Some(commands.join(" && "));
+    }
+
     let mut install_steps: Vec<String> = Vec::new();
 
     if stack_enabled(lock, "node", primary_only) {
@@ -187,13 +204,132 @@ fn build_post_create_command(lock: &DevsyncLock, primary_only: bool) -> Option<S
     if install_steps.is_empty() {
         None
     } else {
-        commands.push(
-            "git config --global --add safe.directory ${containerWorkspaceFolder} || true"
-                .to_string(),
-        );
         commands.extend(install_steps);
         Some(commands.join(" && "))
     }
+}
+
+fn detect_custom_bootstrap_command(
+    root: &Path,
+    lock: &DevsyncLock,
+    primary_only: bool,
+) -> Option<String> {
+    if let Some(override_command) = detect_bootstrap_override(root) {
+        return Some(override_command);
+    }
+
+    if stack_enabled(lock, "node", primary_only) {
+        if let Some(script_name) = detect_node_bootstrap_script(root) {
+            return Some(build_node_script_command(
+                lock.package_managers.node.as_deref(),
+                &script_name,
+            ));
+        }
+    }
+
+    if let Some(shell_script) = detect_shell_bootstrap_script(root) {
+        return Some(format!("bash {}", shell_script));
+    }
+
+    detect_make_bootstrap_target(root).map(|target| format!("make {}", target))
+}
+
+fn detect_bootstrap_override(root: &Path) -> Option<String> {
+    let config_path = root.join("devsync.config.toml");
+    if !config_path.is_file() {
+        return None;
+    }
+
+    let raw = fs::read_to_string(&config_path).ok()?;
+    let parsed: toml::Value = toml::from_str(&raw).ok()?;
+
+    parsed
+        .get("bootstrap")
+        .and_then(|bootstrap| {
+            bootstrap
+                .get("command")
+                .or_else(|| bootstrap.get("post_create_command"))
+        })
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn detect_node_bootstrap_script(root: &Path) -> Option<String> {
+    let package_json = root.join("package.json");
+    if !package_json.is_file() {
+        return None;
+    }
+
+    let raw = fs::read_to_string(package_json).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let scripts = parsed.get("scripts")?.as_object()?;
+
+    ["bootstrap", "setup", "dev:setup", "init:dev"]
+        .iter()
+        .find(|script_name| scripts.get(**script_name).is_some())
+        .map(|name| (*name).to_string())
+}
+
+fn build_node_script_command(package_manager: Option<&str>, script_name: &str) -> String {
+    match package_manager {
+        Some("pnpm") => format!(
+            "if [ -f package.json ]; then corepack enable && HUSKY=0 pnpm run {}; else echo 'Skipping pnpm bootstrap: package.json not found'; fi",
+            script_name
+        ),
+        Some("yarn") => format!(
+            "if [ -f package.json ]; then corepack enable && HUSKY=0 yarn run {}; else echo 'Skipping yarn bootstrap: package.json not found'; fi",
+            script_name
+        ),
+        Some("bun") => format!(
+            "if [ -f package.json ]; then HUSKY=0 bun run {}; else echo 'Skipping bun bootstrap: package.json not found'; fi",
+            script_name
+        ),
+        _ => format!(
+            "if [ -f package.json ]; then HUSKY=0 npm run {}; else echo 'Skipping npm bootstrap: package.json not found'; fi",
+            script_name
+        ),
+    }
+}
+
+fn detect_shell_bootstrap_script(root: &Path) -> Option<String> {
+    let candidates = [
+        "scripts/bootstrap.sh",
+        "scripts/setup.sh",
+        "scripts/dev-setup.sh",
+        "bootstrap.sh",
+        "setup.sh",
+    ];
+
+    candidates
+        .iter()
+        .find(|candidate| root.join(candidate).is_file())
+        .map(|candidate| (*candidate).to_string())
+}
+
+fn detect_make_bootstrap_target(root: &Path) -> Option<String> {
+    let makefile_path = if root.join("Makefile").is_file() {
+        root.join("Makefile")
+    } else if root.join("makefile").is_file() {
+        root.join("makefile")
+    } else {
+        return None;
+    };
+
+    let raw = fs::read_to_string(makefile_path).ok()?;
+    for target in ["bootstrap", "setup", "dev-setup"] {
+        let needle = format!("{target}:");
+        if raw
+            .lines()
+            .map(str::trim_start)
+            .any(|line| line.starts_with(&needle))
+        {
+            return Some(target.to_string());
+        }
+    }
+
+    None
 }
 
 fn has_stack(lock: &DevsyncLock, stack: &str) -> bool {
@@ -218,6 +354,7 @@ fn stack_enabled(lock: &DevsyncLock, stack: &str, primary_only: bool) -> bool {
 mod tests {
     use super::*;
     use crate::lockfile::{PackageManagerSection, ProjectSection, RuntimeSection};
+    use tempfile::tempdir;
 
     fn sample_lock() -> DevsyncLock {
         DevsyncLock {
@@ -248,18 +385,53 @@ mod tests {
     #[test]
     fn post_create_respects_primary_only_mode() {
         let lock = sample_lock();
+        let root = tempdir().expect("tempdir should exist");
 
         let default_cmd =
-            build_post_create_command(&lock, false).expect("default command expected");
+            build_post_create_command(root.path(), &lock, false).expect("default command expected");
         assert!(default_cmd.contains("safe.directory"));
         assert!(default_cmd.contains("if [ -f package.json ]"));
         assert!(default_cmd.contains("if [ -f Cargo.toml ]"));
         assert!(default_cmd.contains("pnpm install"));
         assert!(default_cmd.contains("cargo fetch"));
 
-        let primary_cmd = build_post_create_command(&lock, true).expect("primary command expected");
+        let primary_cmd =
+            build_post_create_command(root.path(), &lock, true).expect("primary command expected");
         assert!(primary_cmd.contains("safe.directory"));
         assert!(!primary_cmd.contains("pnpm install"));
         assert!(primary_cmd.contains("cargo fetch"));
+    }
+
+    #[test]
+    fn post_create_prefers_explicit_bootstrap_override() {
+        let lock = sample_lock();
+        let root = tempdir().expect("tempdir should exist");
+        fs::write(
+            root.path().join("devsync.config.toml"),
+            "[bootstrap]\ncommand = \"pnpm run bootstrap\"\n",
+        )
+        .expect("config should be written");
+
+        let cmd = build_post_create_command(root.path(), &lock, false)
+            .expect("postCreate should be generated");
+        assert!(cmd.contains("pnpm run bootstrap"));
+        assert!(!cmd.contains("pnpm install"));
+        assert!(!cmd.contains("cargo fetch"));
+    }
+
+    #[test]
+    fn post_create_detects_node_bootstrap_script() {
+        let lock = sample_lock();
+        let root = tempdir().expect("tempdir should exist");
+        fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"bootstrap":"echo setup"}}"#,
+        )
+        .expect("package.json should be written");
+
+        let cmd = build_post_create_command(root.path(), &lock, false)
+            .expect("postCreate should be generated");
+        assert!(cmd.contains("pnpm run bootstrap"));
+        assert!(!cmd.contains("pnpm install"));
     }
 }
