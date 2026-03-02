@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
@@ -15,7 +15,7 @@
   <body>
     <header class="site-header">
       <div class="container header-inner">
-        <a class="brand" href="index.html">
+        <a class="brand" href="index.html" aria-label="DevSync home">
           <span class="brand-mark" aria-hidden="true"></span>
           DevSync
         </a>
@@ -27,76 +27,78 @@
       </div>
     </header>
 
-    <main class="container" style="padding: 56px 0 80px">
-      <article class="panel" style="padding: 22px">
-        <h1 style="margin-top: 0">Terms of Service</h1>
-        <p><strong>Effective date:</strong> March 1, 2026</p>
+    <main class="legal-main">
+      <div class="container">
+        <article class="legal-card">
+          <h1>Terms of Service</h1>
+          <p><strong>Effective date:</strong> March 1, 2026</p>
 
-        <h2>1. Service</h2>
-        <p>
-          DevSync provides developer tooling and related services for environment standardization,
-          team collaboration, and governance workflows.
-        </p>
+          <h2>1. Service</h2>
+          <p>
+            DevSync provides developer tooling for environment standardization, team collaboration,
+            and governance workflows.
+          </p>
 
-        <h2>2. Accounts and Access</h2>
-        <p>
-          You are responsible for maintaining account security and for activities conducted under
-          your account credentials.
-        </p>
+          <h2>2. Accounts and Access</h2>
+          <p>
+            You are responsible for account security and activities performed under your account.
+          </p>
 
-        <h2>3. Subscription and Billing</h2>
-        <p>
-          Paid plans are billed on a recurring basis (monthly or annual) according to your selected
-          plan and seat count. Charges are non-refundable except where required by law.
-        </p>
+          <h2>3. Subscription and Billing</h2>
+          <p>
+            Paid plans are billed monthly or annually based on selected plan and seat count.
+            Charges are non-refundable except where required by law.
+          </p>
 
-        <h2>4. Acceptable Use</h2>
-        <p>
-          You agree not to misuse the service, interfere with platform operations, or use DevSync
-          for unlawful activities.
-        </p>
+          <h2>4. Acceptable Use</h2>
+          <p>
+            You agree not to misuse the service, disrupt operations, or use DevSync for unlawful
+            activities.
+          </p>
 
-        <h2>5. Intellectual Property</h2>
-        <p>
-          We retain all rights in the DevSync platform, software, and branding. You retain rights
-          to your code, configurations, and repository content.
-        </p>
+          <h2>5. Intellectual Property</h2>
+          <p>
+            DevSync retains rights to the platform and branding. You retain rights to your code,
+            configurations, and repository content.
+          </p>
 
-        <h2>6. Service Availability</h2>
-        <p>
-          We aim for reliable operation but do not guarantee uninterrupted availability. We may
-          modify features as the service evolves.
-        </p>
+          <h2>6. Service Availability</h2>
+          <p>
+            We aim for reliable operation but do not guarantee uninterrupted availability. Features
+            may evolve over time.
+          </p>
 
-        <h2>7. Limitation of Liability</h2>
-        <p>
-          To the extent permitted by law, DevSync is not liable for indirect, incidental, special,
-          or consequential damages arising from service use.
-        </p>
+          <h2>7. Limitation of Liability</h2>
+          <p>
+            To the extent permitted by law, DevSync is not liable for indirect or consequential
+            damages arising from service use.
+          </p>
 
-        <h2>8. Contact</h2>
-        <p>
-          For legal questions, contact
-          <a href="mailto:mshabeeburrahman786@gmail.com">mshabeeburrahman786@gmail.com</a>.
-        </p>
+          <h2>8. Contact</h2>
+          <p>
+            For legal inquiries:
+            <a href="mailto:mshabeeburrahman786@gmail.com">mshabeeburrahman786@gmail.com</a>
+          </p>
 
-        <p style="margin-top: 20px">
-          This template is provided for initial launch and should be reviewed by legal counsel
-          before production use.
-        </p>
-      </article>
+          <p>
+            This template is for initial launch and should be reviewed by legal counsel before
+            production use.
+          </p>
+        </article>
+      </div>
     </main>
 
     <footer class="site-footer">
-      <div class="container">
+      <div class="container footer-inner">
+        <p>© <span id="year"></span> DevSync Labs</p>
         <p>
-          © <span id="year"></span> DevSync Labs. <a href="index.html">Home</a> ·
+          <a href="index.html">Home</a>
+          <span>·</span>
           <a href="privacy.html">Privacy</a>
         </p>
       </div>
     </footer>
-    <script>
-      document.getElementById("year").textContent = new Date().getFullYear();
-    </script>
+
+    <script src="app.js"></script>
   </body>
 </html>
